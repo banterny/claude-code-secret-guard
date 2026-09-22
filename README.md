@@ -4,6 +4,10 @@ A [Claude Code](https://claude.com/claude-code) `PreToolUse` hook that blocks
 `git commit`/`git push` when the change contains a hardcoded secret (API key,
 token, private key, etc.), detected with [gitleaks](https://github.com/gitleaks/gitleaks).
 
+> Using [OpenCode](https://opencode.ai) instead? See the sibling port
+> [opencode-secret-guard](https://github.com/banterny/opencode-secret-guard) —
+> same design, `tool.execute.before` plugin.
+
 ## Why this instead of a general secret/security-guard tool
 
 Tools that scan *every* Bash call for risky content are appealing but pay
