@@ -54,14 +54,26 @@ if [ "$is_commit" = "1" ]; then
   # costs scanning a wider (still-correct) diff, never a missed secret.
   is_all=0
   printf '%s\n' "$cmd" | grep -qE '(^|[[:space:]])(--all|-[a-zA-Z]*a[a-zA-Z]*)([[:space:]]|$)' && is_all=1
-  if [ "$is_all" = "1" ]; then
-    report=$(git diff HEAD 2>/dev/null | gitleaks detect --no-git --pipe --no-banner --redact --no-color 2>&1)
-  else
-    report=$(gitleaks protect --staged --no-banner --redact --no-color 2>&1)
-  fi
+  # The staged scan always runs, so the wider scan can only add coverage.
+  report=$(gitleaks git --pre-commit --staged --no-banner --redact --no-color 2>&1)
   rc=$?
+  if [ "$rc" != "1" ] && [ "$is_all" = "1" ]; then
+    # Wider scan: what is not staged yet but could still end up in this
+    # commit — unstaged changes to tracked files (`git diff`, which unlike
+    # `git diff HEAD` also works before the first commit), plus untracked
+    # files that are not git-ignored (a `git add --all` chained ahead of
+    # the commit hasn't run yet when this hook fires). Piped into
+    # `gitleaks stdin` so only that text is scanned: `detect --no-git
+    # --pipe` ignores the pipe and scans the whole folder, git-ignored
+    # build output included.
+    report=$({
+      git diff --no-ext-diff --no-color
+      git ls-files --others --exclude-standard -z -- ':/' | xargs -0 cat --
+    } 2>/dev/null | gitleaks stdin --no-banner --redact --no-color 2>&1)
+    rc=$?
+  fi
   if [ "$rc" = "1" ]; then
-    echo "Blocked by the secret-commit guard (deny-secret-commit.sh): changes being committed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; unstage/revert the file, rotate the credential, and explain the block to the user. Details:" >&2
+    echo "Blocked by the secret-commit guard ($0): changes being committed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; unstage/revert the file, rotate the credential, and explain the block to the user. Details:" >&2
     printf '%s\n' "$report" >&2
     exit 2
   fi
@@ -79,10 +91,10 @@ if [ "$is_push" = "1" ]; then
   else
     range="-1"
   fi
-  report=$(gitleaks detect --no-banner --redact --no-color --log-opts="$range" 2>&1)
+  report=$(gitleaks git --no-banner --redact --no-color --log-opts="$range" 2>&1)
   rc=$?
   if [ "$rc" = "1" ]; then
-    echo "Blocked by the secret-commit guard (deny-secret-commit.sh): commit(s) about to be pushed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user. Details:" >&2
+    echo "Blocked by the secret-commit guard ($0): commit(s) about to be pushed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user. Details:" >&2
     printf '%s\n' "$report" >&2
     exit 2
   fi

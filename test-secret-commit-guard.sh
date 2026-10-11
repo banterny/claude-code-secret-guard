@@ -108,7 +108,85 @@ git add secret3.txt
 git commit -qm "leak commit" >/dev/null
 check block 'git push origin main'
 
+# ==== wider-scan regressions ====
+# The `-a` scan must look at the change being committed, not at the folder.
+# Second scratch repo with a git-ignored build folder holding a fake secret
+# (the shape of Next.js's `.next/`): nothing in it can ever be committed, so
+# it must never cause a block.
+REPO2=$(mktemp -d /tmp/secret-guard-test.XXXXXX)
+cd "$REPO2" || exit 1
+git init -q
+git config user.email test@test.com
+git config user.name test
+echo "build/" > .gitignore
+echo "hello" > README.md
+git add .gitignore README.md
+git commit -qm init >/dev/null
+mkdir build
+echo "TOKEN=$TOK" > build/generated.js
+
+# ---- clean staged change, unrelated `-a` later in the chain -> allow ----
+echo "clean content" > file.txt
+git add file.txt
+check allow 'git add file.txt && git commit -m "x" && git branch -a' "$REPO2"
+
+# ---- not a commit at all: a file search naming `.git` and "commit" -> allow ----
+check allow 'find . -maxdepth 3 -name "deny-secret-commit.sh" -not -path "./.git/*"' "$REPO2"
+
+# ---- clean unstaged tracked-file modification under -a -> allow ----
+echo "a harmless readme edit" >> README.md
+check allow 'git commit -am "x"' "$REPO2"
+git checkout -q -- README.md
+
+# ---- real secret under -a (tracked file, modified, not staged) -> block ----
+echo "TOKEN=$TOK" >> README.md
+check block 'git commit -am "x"' "$REPO2"
+git checkout -q -- README.md
+
+# ---- real secret, staged -> block ----
+echo "TOKEN=$TOK" > secret4.txt
+git add secret4.txt
+check block 'git commit -m "x"' "$REPO2"
+git reset -q -- secret4.txt
+rm -f secret4.txt
+
+# ---- brand-new untracked secret file, added earlier in the same chain ----
+# (not in any diff yet when the hook fires, so the wider scan has to read
+# untracked files that are not git-ignored)
+echo "TOKEN=$TOK" > new-secret.txt
+check block 'git add --all && git commit -m "x"' "$REPO2"
+check block 'git add . && git commit -am "x"' "$REPO2"
+rm -f new-secret.txt
+
+# ---- git push: clean commit, secret only in the ignored folder -> allow ----
+git commit -qm "clean commit" >/dev/null
+check allow 'git push' "$REPO2"
+
+# ---- git push: real secret in a commit being pushed -> block ----
+echo "TOKEN=$TOK" > secret5.txt
+git add secret5.txt
+git commit -qm "leak commit" >/dev/null
+check block 'git push origin main' "$REPO2"
+
+# ---- repo with no commits yet (no HEAD to diff against) ----
+REPO3=$(mktemp -d /tmp/secret-guard-test.XXXXXX)
+cd "$REPO3" || exit 1
+git init -q
+git config user.email test@test.com
+git config user.name test
+
+# secret staged, commit -am -> block
+echo "TOKEN=$TOK" > first.txt
+git add first.txt
+check block 'git commit -am "first"' "$REPO3"
+
+# file staged clean, secret added afterwards (unstaged), commit -am -> block
+echo "clean" > first.txt
+git add first.txt
+echo "TOKEN=$TOK" >> first.txt
+check block 'git commit -am "first"' "$REPO3"
+
 echo ""
 echo "passed: $pass, failed: $fail"
-rm -rf "$REPO"
+rm -rf "$REPO" "$REPO2" "$REPO3"
 [ "$fail" -eq 0 ] || exit 1

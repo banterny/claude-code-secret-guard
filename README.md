@@ -23,10 +23,13 @@ commit/push.
 
 ## What it catches
 
-- `git commit` — scans the staged diff (`gitleaks protect --staged`).
-- `git commit -a` / `-am` / `--all` — scans the full working-tree diff
-  instead, since those flags fold in unstaged tracked changes that
-  `--staged` alone can't see yet.
+- `git commit` — scans the staged diff (`gitleaks git --pre-commit --staged`).
+- `git commit -a` / `-am` / `--all` — also scans unstaged changes to
+  tracked files and untracked files that aren't git-ignored (piped into
+  `gitleaks stdin`), since those flags — or a `git add --all` chained ahead
+  of the commit — fold in changes `--staged` alone can't see yet.
+  Git-ignored files (build output such as `.next/`) can't be committed and
+  are never scanned.
 - `git push` — scans commits not yet on the upstream branch (falling back to
   `origin/HEAD`, or the tip commit alone if neither is available).
 
@@ -38,7 +41,8 @@ direction here, so that's the one this hook takes.
 
 ## Install
 
-Requires [`gitleaks`](https://github.com/gitleaks/gitleaks) and `jq` on `PATH`:
+Requires [`gitleaks`](https://github.com/gitleaks/gitleaks) 8.19.0 or later
+(for its `git` and `stdin` commands) and `jq` on `PATH`:
 
 ```sh
 brew install gitleaks jq   # macOS; see gitleaks releases for other platforms
@@ -73,9 +77,10 @@ Restart the session (or start a new one) for the hook to take effect.
 ```
 
 Builds a real scratch git repo and exercises the hook against it — trigger
-matching, staged/unstaged/committed secrets, push-range fallbacks, and a
-non-git working directory. No network access, nothing touches your real
-repos.
+matching, staged/unstaged/untracked/committed secrets, a secret in a
+git-ignored build folder (must not block), a repo with no commits yet,
+push-range fallbacks, and a non-git working directory. No network access,
+nothing touches your real repos.
 
 ## Limitations
 
@@ -97,6 +102,10 @@ repos.
   control; push-time scanning is a backstop for history the hook didn't see
   committed (e.g. commits made outside Claude Code, or before this hook was
   installed).
+- **The `-a` scan reads removed lines too.** It scans the raw `git diff`
+  text, so `git commit -am "remove leaked key"` is blocked by the very line
+  being deleted. Stage the change and commit without `-a` instead; the
+  staged scan only looks at added lines.
 - **cwd, not `-C`.** The hook reads the working directory from the
   `PreToolUse` payload's `cwd` field, which is reliable for ordinary
   invocations. A command that explicitly targets another directory via
