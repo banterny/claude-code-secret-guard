@@ -1,0 +1,61 @@
+#!/bin/sh
+# Git pre-push hook: refuses a push when any commit being pushed contains a
+# hardcoded secret (API key, token, private key, etc.), detected via
+# gitleaks. Git-level companion to deny-secret-commit.sh; see pre-commit.
+#
+# Git passes the remote's name as $1 and, on stdin, one line per ref being
+# pushed:  <local ref> <local sha> <remote ref> <remote sha>
+# so the commits to scan are known exactly, with no guessing from the
+# upstream branch. A push that only deletes a remote branch has nothing to
+# scan.
+#
+# Block: exit 1 + reason on stderr. Allow: exit 0. If gitleaks is not on
+# PATH the push is allowed, with a warning.
+
+remote="$1"
+input=$(cat)
+
+# An all-zeroes object name means "does not exist" (a new remote ref, or a
+# local ref being deleted). Its length depends on the repo's hash format.
+is_zero() {
+  case "$1" in
+    *[!0]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+if command -v gitleaks >/dev/null 2>&1; then
+  while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "$local_sha" ] || continue
+    is_zero "$local_sha" && continue
+    if ! is_zero "$remote_sha" && git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
+      # The remote ref exists and we have its commit: scan what is new.
+      range="${remote_sha}..${local_sha}"
+    else
+      # New remote ref (or one whose current commit we don't have): scan
+      # every commit being pushed that this remote is not already known
+      # to hold, not just the tip.
+      range="${local_sha} --not --remotes=${remote}"
+    fi
+    report=$(gitleaks git --no-banner --redact --no-color --verbose --log-opts="$range" 2>&1)
+    if [ "$?" = "1" ]; then
+      echo "Blocked by the secret guard (git pre-push hook, $0): commit(s) about to be pushed to ${remote_ref} appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user. Details:" >&2
+      printf '%s\n' "$report" >&2
+      exit 1
+    fi
+  done <<EOF
+$input
+EOF
+else
+  echo "secret guard (git pre-push hook): gitleaks was not found on PATH, so this push was NOT scanned for secrets." >&2
+fi
+
+# core.hooksPath replaces the repo's own hooks folder, so hand on to the
+# repo's own pre-push hook if it has one, with the same input.
+own_hook="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/pre-push"
+if [ -x "$own_hook" ] && ! [ "$own_hook" -ef "$0" ]; then
+  printf '%s\n' "$input" | "$own_hook" "$@"
+  exit $?
+fi
+
+exit 0

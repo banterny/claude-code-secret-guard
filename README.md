@@ -70,19 +70,82 @@ a project-scoped one) as a `Bash`-matched `PreToolUse` hook:
 
 Restart the session (or start a new one) for the hook to take effect.
 
+## Git-level hooks (any agent, or you)
+
+`git-hooks/pre-commit` and `git-hooks/pre-push` are the same check done by
+git itself instead of by the agent's harness. Git runs them for every
+commit and push, whoever issued the command — Claude Code, OpenCode, Codex,
+a GUI client, or you at a terminal — so they cover what an agent-specific
+hook can't.
+
+They also see the commit as it really is, because git runs them at the
+moment of the commit, from the root of the working tree, after any
+`git add` has happened:
+
+- `pre-commit` scans exactly what is about to be committed
+  (`gitleaks git --pre-commit --staged`), including for `commit -a` and
+  `commit <path>`, for a file staged by a `git add` chained ahead of the
+  commit, and for a commit made from a subfolder. It looks at added lines
+  only, so a commit that removes a leaked secret goes through.
+- `pre-push` scans every commit being pushed, using the list of refs git
+  gives it — on a brand-new branch, all of its unpushed commits, not just
+  the tip.
+
+Install them for every repo on the machine by copying the folder somewhere
+durable and pointing git's global `core.hooksPath` at it:
+
+```sh
+mkdir -p ~/.agents/hooks/git-hooks
+cp git-hooks/pre-commit git-hooks/pre-push ~/.agents/hooks/git-hooks/
+chmod +x ~/.agents/hooks/git-hooks/pre-commit ~/.agents/hooks/git-hooks/pre-push
+git config --global core.hooksPath ~/.agents/hooks/git-hooks
+```
+
+Use them alongside the Claude Code hook, not instead of it: the Claude Code
+hook stops the command before it runs and is not skipped by `--no-verify`;
+the git hooks catch everything else.
+
+Things to know:
+
+- **`core.hooksPath` replaces each repo's own `.git/hooks` folder.** These
+  two hooks hand on to the repo's own `pre-commit` / `pre-push` if it has
+  them, but a repo's other hooks (`commit-msg`, `post-checkout`, …) stop
+  running unless you add them to the global folder too.
+- **A repo that sets its own `core.hooksPath` switches these off for that
+  repo.** [husky](https://typicode.github.io/husky/) does this. Call the
+  hooks from that repo's own hook scripts if you need both.
+- **`git commit --no-verify` / `git push --no-verify` skip them**, as with
+  any git hook.
+- **Merges and rebases don't run `pre-commit`.** The `pre-push` scan is
+  what covers commits made that way.
+- **Fails open, with a warning.** If `gitleaks` isn't on `PATH` the commit
+  or push goes ahead, and the hook says on stderr that it was not scanned.
+
 ## Test
 
 ```sh
 ./test-secret-commit-guard.sh
+./test-git-hooks.sh
 ```
 
-Builds a real scratch git repo and exercises the hook against it — trigger
+`test-secret-commit-guard.sh` builds a real scratch git repo and exercises
+the Claude Code hook against it — trigger
 matching, staged/unstaged/untracked/committed secrets, a secret in a
 git-ignored build folder (must not block), a repo with no commits yet,
-push-range fallbacks, and a non-git working directory. No network access,
-nothing touches your real repos.
+push-range fallbacks, and a non-git working directory.
+
+`test-git-hooks.sh` runs real `git commit` and `git push` commands, against
+scratch repos and a scratch bare remote, with the git-level hooks wired in.
+
+No network access, nothing touches your real repos or your git
+configuration (both scripts tell git to ignore your global config, so an
+installed copy of the git-level hooks doesn't interfere with their
+fixtures).
 
 ## Limitations
+
+These are limits of the Claude Code hook. The git-level hooks above don't
+share the last three (new-branch pushes, removed lines, `-C`).
 
 - **Fails open, silently.** If `gitleaks`, `jq`, or `git` aren't on `PATH`,
   the hook exits 0 (allow) with no warning. This is the right failure

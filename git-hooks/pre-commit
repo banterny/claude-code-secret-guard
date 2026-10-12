@@ -1,0 +1,42 @@
+#!/bin/sh
+# Git pre-commit hook: refuses a commit whose changes contain a hardcoded
+# secret (API key, token, private key, etc.), detected via gitleaks.
+#
+# This is the git-level companion to deny-secret-commit.sh. Git itself runs
+# it for every commit, whoever or whatever issued the command (any coding
+# agent, a GUI client, you at a terminal), and it runs at the moment of the
+# commit, from the root of the working tree, with exactly what is about to
+# be committed. So it needs no guessing from the command line: `commit -a`,
+# `commit <path>`, a `git add` chained ahead of the commit and a commit made
+# from a subfolder are all seen as they really are.
+#
+# Install: point git's global core.hooksPath at the folder holding this file
+# (see README). The repo's own .git/hooks/pre-commit, if any, is still run
+# afterwards. `git commit --no-verify` skips this hook, as it does any other.
+#
+# Block: exit 1 + reason on stderr. Allow: exit 0. If gitleaks is not on
+# PATH the commit is allowed, with a warning.
+
+if command -v gitleaks >/dev/null 2>&1; then
+  # Scans the staged diff, added lines only (so a commit that removes a
+  # leaked secret is not refused). For `commit -a` and `commit <path>` git
+  # hands this hook a temporary index holding what will be committed, and
+  # gitleaks reads the diff through git, so it sees that too.
+  report=$(gitleaks git --pre-commit --staged --no-banner --redact --no-color --verbose 2>&1)
+  if [ "$?" = "1" ]; then
+    echo "Blocked by the secret guard (git pre-commit hook, $0): changes being committed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; unstage/revert the file, rotate the credential, and explain the block to the user. Details:" >&2
+    printf '%s\n' "$report" >&2
+    exit 1
+  fi
+else
+  echo "secret guard (git pre-commit hook): gitleaks was not found on PATH, so this commit was NOT scanned for secrets." >&2
+fi
+
+# core.hooksPath replaces the repo's own hooks folder, so hand on to the
+# repo's own pre-commit hook if it has one.
+own_hook="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/pre-commit"
+if [ -x "$own_hook" ] && ! [ "$own_hook" -ef "$0" ]; then
+  exec "$own_hook" "$@"
+fi
+
+exit 0
