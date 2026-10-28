@@ -7,6 +7,11 @@ token, private key, etc.), detected with [gitleaks](https://github.com/gitleaks/
 > Using [OpenCode](https://opencode.ai) instead? See the sibling port
 > [opencode-secret-guard](https://github.com/banterny/opencode-secret-guard) —
 > same design, `tool.execute.before` plugin.
+>
+> Want to stop personal data (your email address, for instance) leaking out of
+> an agent into web requests as well? See
+> [agent-privacy-guard](https://github.com/banterny/agent-privacy-guard), for
+> Claude Code, Codex and OpenCode.
 
 ## Why this instead of a general secret/security-guard tool
 
