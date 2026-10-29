@@ -405,6 +405,12 @@ git commit -qm "fixture: extend key spelled with an escape" >/dev/null
 git add s.txt
 check block 'git commit -m "x"' "$PWD"
 git reset -q
+printf "# '''\n[extend]\npath = \"%s\"\n# '''\n" "$NEW/outside4.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: triple quotes in comments around the extend path" >/dev/null
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
+git reset -q
 # a path that is also a git pattern (*.toml) is taken as a plain name
 printf '[extend]\nuseDefault = true\n' > base.toml
 printf '[extend]\npath = "*.toml"\n' > .gitleaks.toml

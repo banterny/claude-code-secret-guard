@@ -325,6 +325,12 @@ git commit -qm "fixture: extend key spelled with an escape"
 git add s.txt
 check block "commit with an extend key spelled with an escape" g commit -qm "x"
 git reset -q -- s.txt
+printf "# '''\n[extend]\npath = \"%s\"\n# '''\n" "$BASE/allow-all.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: triple quotes in comments around the extend path"
+git add s.txt
+check block "commit with triple quotes in comments around the extend path" g commit -qm "x"
+git reset -q -- s.txt
 
 # ---- a commit that stages a change to the extended file ----
 newrepo staged-extended
