@@ -335,6 +335,41 @@ echo "TOKEN=$TOK" > s.txt
 git add s.txt
 check block 'git commit -m "x"' "$PWD"
 
+# ---- a committed settings file that pulls in a file outside the repo ----
+newrepo extended-settings
+printf '[extend]\nuseDefault = true\n' > "$NEW/outside2.toml"
+printf '[extend]\npath = "%s"\n' "$NEW/outside2.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: settings extend an outside file" >/dev/null
+printf '%s\n' "$ALLOW_ALL" > "$NEW/outside2.toml"
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
+git reset -q
+rm s.txt
+# ...while one inside the repo, committed as it is, is trusted
+mkdir cfg fixtures
+printf '[extend]\nuseDefault = true\n[allowlist]\npaths = ["fixtures/"]\n' > cfg/base.toml
+printf '[extend]\npath = "cfg/base.toml"\n' > .gitleaks.toml
+git add cfg .gitleaks.toml
+git commit -qm "fixture: settings extend a file in the repo" >/dev/null
+echo "TOKEN=$TOK" > fixtures/f.txt
+git add fixtures
+check allow 'git commit -m "x"' "$PWD"
+printf '%s\n' "$ALLOW_ALL" > cfg/base.toml
+check block 'git commit -m "x"' "$PWD"          # the extended file, edited in place
+git checkout -q -- cfg/base.toml
+git reset -q
+
+# ---- push while HEAD is a new, empty branch ----
+newrepo unborn
+git checkout -q -b leaky
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+git commit -qm "fixture: leak commit" >/dev/null
+git checkout -q --orphan empty
+check block 'git push origin leaky' "$PWD"
+
 cd / && rm -rf "$NEW"
 
 echo ""

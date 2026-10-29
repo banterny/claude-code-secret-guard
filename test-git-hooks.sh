@@ -292,6 +292,17 @@ echo "TOKEN=$TOK" > s.txt
 git add s.txt
 check block "commit with .gitleaks.toml linked to an allow-all file" g commit -qm "x"
 
+# ---- a committed settings file that pulls in a file outside the repo ----
+newrepo extended-settings
+printf '[extend]\nuseDefault = true\n' > "$BASE/outside2.toml"
+printf '[extend]\npath = "%s"\n' "$BASE/outside2.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: settings extend an outside file"
+cp "$BASE/allow-all.toml" "$BASE/outside2.toml"
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block "commit with .gitleaks.toml extending an allow-all file outside the repo" g commit -qm "x"
+
 echo ""
 echo "passed: $pass, failed: $fail"
 cd / && rm -rf "$BASE"

@@ -57,7 +57,9 @@ the command. The git-level hooks below do the same.
   are ignored.
 - gitleaks reads `.gitleaks.toml` and `.gitleaksignore` from the folder it
   scans and skips what they say. Copies committed exactly as they are are
-  trusted, but never a link (git doesn't track what it points to). A
+  trusted, but never a link (git doesn't track what it points to), and a
+  `.gitleaks.toml` that pulls in another file with `[extend] path` is
+  trusted only if that file is in the repo and committed as it is. A
   commit or push is refused while either file is new, edited, uncommitted
   or a link, and a commit that changes either is refused too: you
   check the change and commit it yourself (with `git commit --no-verify`

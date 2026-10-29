@@ -92,14 +92,38 @@ done | sort -u)
 # and skips whatever they tell it to, so anyone who can edit them can switch
 # the scan off. Only copies exactly as committed are trusted, and never a
 # link, whose target git does not track; this prints any others.
+is_settled() { # $1 = file; tracked, unchanged since the last commit, not a link
+  [ ! -L "$1" ] && [ -e "$1" ] &&
+    git ls-files --error-unmatch -- "$1" >/dev/null 2>&1 &&
+    git diff --quiet HEAD -- "$1" >/dev/null 2>&1
+}
+# The `path` in a settings file's [extend] table, if any. An inline
+# `extend = { ... }` table is reported as "/", which is never trusted.
+extend_path() {
+  awk -v q="'" -v dq='"' '
+    /^[[:space:]]*[[]/ { s = $0; gsub(/[[:space:]]/, "", s); next }
+    /^[[:space:]]*extend[[:space:]]*=/ { print "/"; exit }
+    s == "[extend]" && /^[[:space:]]*path[[:space:]]*=/ {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*(#.*)?$/, "", v)
+      gsub("^[" dq q "]+|[" dq q "]+$", "", v); print v; exit
+    }' "$1" 2>/dev/null
+}
 unsettled_settings() {
   for f in .gitleaks.toml .gitleaksignore; do
-    [ -L "$f" ] && { printf '%s\n' "$f"; continue; }
-    [ -e "$f" ] || continue
-    git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
-      git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
-    printf '%s\n' "$f"
+    { [ -e "$f" ] || [ -L "$f" ]; } || continue
+    is_settled "$f" || printf '%s\n' "$f"
   done
+  # A trusted .gitleaks.toml can still pull in another file through
+  # `[extend] path`. That file must be inside the repo, trusted the same
+  # way, and must not extend anything further.
+  if [ -f .gitleaks.toml ]; then
+    p=$(extend_path .gitleaks.toml)
+    case "$p" in
+      "") ;;
+      /*|"~"*|*..*) printf '%s\n' .gitleaks.toml ;;
+      *) { is_settled "$p" && [ -z "$(extend_path "$p")" ]; } || printf '%s\n' .gitleaks.toml ;;
+    esac
+  fi
 }
 # Settings files whose staged copy differs from the last commit.
 staged_settings() {
@@ -110,7 +134,7 @@ staged_settings() {
   fi
 }
 settings_block() { # $1 = the files
-  echo "Blocked by the secret-commit guard ($0): gitleaks's settings file(s) $(printf '%s' "$1" | tr '\n' ' ')in $(pwd) are new, changed or a link, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. Do not edit, delete or work around them; explain the block to the user, who can check the change and commit it themselves." >&2
+  echo "Blocked by the secret-commit guard ($0): gitleaks's settings file(s) $(printf '%s' "$1" | tr '\n' ' ')in $(pwd) are new, changed or a link, pull in a file that is, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. Do not edit, delete or work around them; explain the block to the user, who can check the change and commit it themselves." >&2
   exit 2
 }
 
@@ -156,7 +180,7 @@ scan_repo() { # $1 = top of a work tree; exits 2 to block
   fi
 
   if [ "$is_push" = "1" ]; then
-    bad=$(unsettled_settings)
+    bad=$(unsettled_settings | sort -u)
     [ -n "$bad" ] && settings_block "$bad"
 
     # Every commit on HEAD (even when it is not on a branch), a local branch
@@ -165,8 +189,12 @@ scan_repo() { # $1 = top of a work tree; exits 2 to block
     # easy to get wrong, so this covers them all; the cost is that a secret
     # on an unpushed branch also blocks pushing another. With no
     # remote-tracking branches at all, that is the whole history, which is
-    # what a first push publishes.
-    report=$(gitleaks git $GITLEAKS_FLAGS --log-opts="HEAD --branches --tags --not --remotes" 2>&1)
+    # what a first push publishes. HEAD is left out when it has no commit
+    # yet (a new, empty branch): git would refuse the whole list, and the
+    # scan would find nothing.
+    revs="--branches --tags"
+    git rev-parse -q --verify HEAD >/dev/null 2>&1 && revs="HEAD $revs"
+    report=$(gitleaks git $GITLEAKS_FLAGS --log-opts="$revs --not --remotes" 2>&1)
     rc=$?
     if [ "$rc" = "1" ]; then
       echo "Blocked by the secret-commit guard ($0): commit(s) in $(pwd) that are not on any remote yet appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user. Details:" >&2

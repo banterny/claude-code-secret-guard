@@ -28,24 +28,51 @@ is_zero() {
 # command can set for itself to replace the rules this scan relies on.
 unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
 
+# gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it scans
+# (here, the top of the work tree) and skips whatever they tell it to. Only
+# copies exactly as committed are trusted, and never a link, whose target
+# git does not track.
+is_settled() { # $1 = file; tracked, unchanged since the last commit, not a link
+  [ ! -L "$1" ] && [ -e "$1" ] &&
+    git ls-files --error-unmatch -- "$1" >/dev/null 2>&1 &&
+    git diff --quiet HEAD -- "$1" >/dev/null 2>&1
+}
+# The `path` in a settings file's [extend] table, if any. An inline
+# `extend = { ... }` table is reported as "/", which is never trusted.
+extend_path() {
+  awk -v q="'" -v dq='"' '
+    /^[[:space:]]*[[]/ { s = $0; gsub(/[[:space:]]/, "", s); next }
+    /^[[:space:]]*extend[[:space:]]*=/ { print "/"; exit }
+    s == "[extend]" && /^[[:space:]]*path[[:space:]]*=/ {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*(#.*)?$/, "", v)
+      gsub("^[" dq q "]+|[" dq q "]+$", "", v); print v; exit
+    }' "$1" 2>/dev/null
+}
+unsettled_settings() { # prints each settings file that is not trusted
+  for f in .gitleaks.toml .gitleaksignore; do
+    { [ -e "$f" ] || [ -L "$f" ]; } || continue
+    is_settled "$f" || printf '%s\n' "$f"
+  done
+  # A trusted .gitleaks.toml can still pull in another file through
+  # `[extend] path`. That file must be inside the repo, trusted the same
+  # way, and must not extend anything further.
+  if [ -f .gitleaks.toml ]; then
+    p=$(extend_path .gitleaks.toml)
+    case "$p" in
+      "") ;;
+      /*|"~"*|*..*) printf '%s\n' .gitleaks.toml ;;
+      *) { is_settled "$p" && [ -z "$(extend_path "$p")" ]; } || printf '%s\n' .gitleaks.toml ;;
+    esac
+  fi
+}
+
 if command -v gitleaks >/dev/null 2>&1; then
-  # gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it
-  # scans (here, the top of the work tree) and skips whatever they tell it
-  # to. In a work tree, only copies exactly as committed are trusted (never
-  # a link, whose target git does not track). A bare repo has no work tree,
-  # so files kept beside it are used as they are.
+  # A bare repo has no work tree, so settings files kept beside it are used
+  # as they are.
   if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ]; then
-    bad=$(
-      for f in .gitleaks.toml .gitleaksignore; do
-        [ -L "$f" ] && { printf '%s ' "$f"; continue; }
-        [ -e "$f" ] || continue
-        git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
-          git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
-        printf '%s ' "$f"
-      done
-    )
+    bad=$(unsettled_settings | sort -u | tr '\n' ' ')
     if [ -n "$bad" ]; then
-      echo "Blocked by the secret guard (git pre-push hook, $0): gitleaks's settings file(s) ${bad}are new, changed, a link, or not committed. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. If you are an agent, do not edit, delete or work around them; explain the block to the user. If the change is yours, check it and commit it (with \`git commit --no-verify\`), or undo it, then push again." >&2
+      echo "Blocked by the secret guard (git pre-push hook, $0): gitleaks's settings file(s) ${bad}are new, changed, a link, pull in a file that is, or are not committed. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. If you are an agent, do not edit, delete or work around them; explain the block to the user. If the change is yours, check it and commit it (with \`git commit --no-verify\`), or undo it, then push again." >&2
       exit 1
     fi
   fi
