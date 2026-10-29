@@ -25,12 +25,13 @@ unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
 if command -v gitleaks >/dev/null 2>&1; then
   # gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it
   # scans and skips whatever they tell it to, so a change to them can switch
-  # the scan off. Only copies exactly as committed are trusted, and a commit
-  # that changes them is refused: you check the change and commit it with
-  # --no-verify yourself.
+  # the scan off. Only copies exactly as committed are trusted (never a
+  # link, whose target git does not track), and a commit that changes them
+  # is refused: you check the change and commit it with --no-verify yourself.
   bad=$(
     for f in .gitleaks.toml .gitleaksignore; do
-      { [ -e "$f" ] || [ -L "$f" ]; } || continue
+      [ -L "$f" ] && { printf '%s\n' "$f"; continue; }
+      [ -e "$f" ] || continue
       git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
         git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
       printf '%s\n' "$f"
@@ -42,7 +43,7 @@ if command -v gitleaks >/dev/null 2>&1; then
     fi
   )
   if [ -n "$bad" ]; then
-    echo "Blocked by the secret guard (git pre-commit hook, $0): gitleaks's settings file(s) $(printf '%s\n' "$bad" | sort -u | tr '\n' ' ')are new or changed, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. If you are an agent, do not edit, delete or work around them; explain the block to the user. If you made the change yourself and have checked it, commit it with \`git commit --no-verify\`." >&2
+    echo "Blocked by the secret guard (git pre-commit hook, $0): gitleaks's settings file(s) $(printf '%s\n' "$bad" | sort -u | tr '\n' ' ')are new, changed or a link, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. If you are an agent, do not edit, delete or work around them; explain the block to the user. If you made the change yourself and have checked it, commit it with \`git commit --no-verify\`." >&2
     exit 1
   fi
 

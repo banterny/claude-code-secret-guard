@@ -306,6 +306,34 @@ git commit -qm "fixture: leak commit" >/dev/null
 git checkout -q -
 check block 'git push origin feature' "$PWD"
 check block 'git push --all' "$PWD"
+# a push from a detached HEAD (the commit is on no branch)
+git checkout -q --detach
+git rm -q s.txt 2>/dev/null; echo "TOKEN=$TOK" > detached.txt
+git add detached.txt
+git commit -qm "fixture: leak on a detached HEAD" >/dev/null
+git branch -q -D feature
+check block 'git push origin HEAD:main' "$PWD"
+
+# ---- a decoy cd or -C into a folder that is not a repo ----
+newrepo decoy
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+mkdir -p "$NEW/not-a-repo"
+check block "cd \"$NEW/not-a-repo\" && cd \"$PWD\" && git commit -m x" "$PWD"
+check block "git -C \"$NEW/not-a-repo\" status; git commit -m x" "$PWD"
+git reset -q
+rm s.txt
+
+# ---- a settings file that is a link to a file outside the repo ----
+newrepo linked-settings
+printf '[extend]\nuseDefault = true\n' > "$NEW/outside.toml"
+ln -s "$NEW/outside.toml" .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: settings as a link" >/dev/null
+printf '%s\n' "$ALLOW_ALL" > "$NEW/outside.toml"
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
 
 cd / && rm -rf "$NEW"
 

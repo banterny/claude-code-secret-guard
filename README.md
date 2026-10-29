@@ -31,7 +31,9 @@ commit/push.
 - `git commit` — scans the staged diff (`gitleaks git --pre-commit --staged`),
   from the top of the repo, so a commit made from a subfolder is scanned in
   full. A command that starts with `cd <folder> &&` (or `;`), or uses
-  `git -C <folder>`, is scanned in that folder.
+  `git -C <folder>`, is scanned in that folder as well as in the session's
+  own, and a finding in either blocks, so a decoy `cd` can't steer the scan
+  away.
 - `git commit -a` / `-i` / `-o` (or `--all`, `--include`, `--only`, also
   inside a cluster such as `-am`), or a `git add` / `git stage` earlier in
   the same command — also scans lines added by unstaged changes to tracked
@@ -40,9 +42,10 @@ commit/push.
   yet. Removed lines are not scanned, so a commit that deletes a leaked
   secret goes through. Git-ignored files (build output such as `.next/`)
   can't be committed and are never scanned.
-- `git push` — scans every commit on a local branch or tag that no remote
-  has yet, so `git push origin <other branch>`, `--all` and `--tags` are
-  covered as well as the current branch. On a first push, with no
+- `git push` — scans every commit on HEAD, a local branch or a tag that no
+  remote has yet, so `git push origin <other branch>`, `--all`, `--tags`
+  and a push from a detached HEAD are covered as well as the current
+  branch. On a first push, with no
   remote-tracking branches, that is the whole history.
 
 It also refuses to let the scan be switched off from inside the repo or
@@ -54,8 +57,9 @@ the command. The git-level hooks below do the same.
   are ignored.
 - gitleaks reads `.gitleaks.toml` and `.gitleaksignore` from the folder it
   scans and skips what they say. Copies committed exactly as they are are
-  trusted. A commit or push is refused while either file is new, edited
-  or uncommitted, and a commit that changes either is refused too: you
+  trusted, but never a link (git doesn't track what it points to). A
+  commit or push is refused while either file is new, edited, uncommitted
+  or a link, and a commit that changes either is refused too: you
   check the change and commit it yourself (with `git commit --no-verify`
   when the git-level hooks are installed).
 
@@ -201,6 +205,9 @@ share the last two (reading the command, unpushed branches).
   covers every local commit that no remote has, so a secret left on one
   unpushed branch also blocks pushing a different, clean one. Remove the
   secret from that branch (or delete the branch) first.
+- **The push scan trusts git's local record of what each remote holds**
+  (`refs/remotes/…`). A command that rewrites that record could hide
+  commits from it; the git-level `pre-push` hook relies on the same record.
 
 Tested on macOS with gitleaks 8.30.1, using POSIX `sh` and extended-regex
 (`grep -E`) throughout; not yet verified on Linux.

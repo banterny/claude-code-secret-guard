@@ -281,6 +281,17 @@ check block "push with an untracked allow-all .gitleaks.toml" g push -q origin c
 rm .gitleaks.toml
 check allow "same push once the settings file is gone" g push -q origin clean2
 
+# ---- a settings file that is a link to a file outside the repo ----
+newrepo linked-settings
+printf '[extend]\nuseDefault = true\n' > "$BASE/outside.toml"
+ln -s "$BASE/outside.toml" .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: settings as a link"
+cp "$BASE/allow-all.toml" "$BASE/outside.toml"
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block "commit with .gitleaks.toml linked to an allow-all file" g commit -qm "x"
+
 echo ""
 echo "passed: $pass, failed: $fail"
 cd / && rm -rf "$BASE"
