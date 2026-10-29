@@ -302,6 +302,29 @@ cp "$BASE/allow-all.toml" "$BASE/outside2.toml"
 echo "TOKEN=$TOK" > s.txt
 git add s.txt
 check block "commit with .gitleaks.toml extending an allow-all file outside the repo" g commit -qm "x"
+git reset -q -- s.txt
+
+# ---- other spellings of extend that gitleaks honours ----
+newrepo dotted-extend
+printf 'extend.path = "%s"\n' "$BASE/allow-all.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: dotted extend key"
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block "commit with a dotted extend.path to an allow-all file" g commit -qm "x"
+git reset -q -- s.txt
+
+# ---- a commit that stages a change to the extended file ----
+newrepo staged-extended
+mkdir cfg
+printf '[extend]\nuseDefault = true\n' > cfg/base.toml
+printf '[extend]\npath = "cfg/base.toml"\n' > .gitleaks.toml
+git add cfg .gitleaks.toml
+git commit -qm "fixture: settings extend a file in the repo"
+cp "$BASE/allow-all.toml" cfg/base.toml
+git add cfg/base.toml
+git show HEAD:cfg/base.toml > cfg/base.toml
+check block "commit staging a change to the extended settings file" g commit -qm "tweak"
 
 echo ""
 echo "passed: $pass, failed: $fail"

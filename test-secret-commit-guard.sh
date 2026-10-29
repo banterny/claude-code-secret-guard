@@ -360,6 +360,34 @@ printf '%s\n' "$ALLOW_ALL" > cfg/base.toml
 check block 'git commit -m "x"' "$PWD"          # the extended file, edited in place
 git checkout -q -- cfg/base.toml
 git reset -q
+# a commit that stages a change to the extended file, with the working copy
+# put back as committed
+printf '%s\n' "$ALLOW_ALL" > cfg/base.toml
+git add cfg/base.toml
+git show HEAD:cfg/base.toml > cfg/base.toml
+check block 'git commit -m "tweak scanner settings"' "$PWD"
+git reset -q
+
+# ---- other spellings of extend that gitleaks honours ----
+newrepo dotted-extend
+printf '%s\n' "$ALLOW_ALL" > "$NEW/outside3.toml"
+printf 'extend.path = "%s"\n' "$NEW/outside3.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: dotted extend key" >/dev/null
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
+git reset -q
+rm s.txt
+# an extended file whose name contains "=" is still read
+printf '[extend]\npath = "%s"\n' "$NEW/outside3.toml" > 'a=b.toml'
+printf '[extend]\npath = "a=b.toml"\n' > .gitleaks.toml
+git add 'a=b.toml' .gitleaks.toml
+git commit -qm "fixture: extend a file named with =" >/dev/null
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
+git reset -q
 
 # ---- push while HEAD is a new, empty branch ----
 newrepo unborn

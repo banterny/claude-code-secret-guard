@@ -31,16 +31,51 @@ is_settled() { # $1 = file; tracked, unchanged since the last commit, not a link
     git ls-files --error-unmatch -- "$1" >/dev/null 2>&1 &&
     git diff --quiet HEAD -- "$1" >/dev/null 2>&1
 }
-# The `path` in a settings file's [extend] table, if any. An inline
-# `extend = { ... }` table is reported as "/", which is never trusted.
+# The `path` in a settings file's [extend] table, if any. gitleaks reads the
+# file as TOML, which can spell the same setting many ways (quoted or dotted
+# keys, inline tables, any capitals, escapes), so only the plain form is
+# accepted: one `[extend]` header holding only `useDefault`, `disabledRules`
+# and a `path` in plain quotes. Anything else that mentions extend prints
+# "/", which is never trusted.
 extend_path() {
   awk -v q="'" -v dq='"' '
-    /^[[:space:]]*[[]/ { s = $0; gsub(/[[:space:]]/, "", s); next }
-    /^[[:space:]]*extend[[:space:]]*=/ { print "/"; exit }
-    s == "[extend]" && /^[[:space:]]*path[[:space:]]*=/ {
-      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*(#.*)?$/, "", v)
-      gsub("^[" dq q "]+|[" dq q "]+$", "", v); print v; exit
-    }' "$1" 2>/dev/null
+    BEGIN {
+      bs = sprintf("%c", 92)
+      str = "(" dq "[^" dq "]*" dq "|" q "[^" q "]*" q ")"
+      item = "^[[:space:]]*(" str "[[:space:]]*,?[[:space:]]*)*[]]?[[:space:]]*(#.*)?$"
+      other = "(^|[[:space:].{,]|" dq "|" q ")extend(" dq "|" q ")?[[:space:]]*[.=]"
+    }
+    { l = tolower($0) }
+    l ~ /^[[:space:]]*(#.*)?$/ { next }
+    l ~ /^[[:space:]]*[[]/ {
+      h = l; sub(/#.*/, "", h); gsub(/[[:space:]]/, "", h)
+      if (h == "[extend]") { sec = "extend"; seen++; next }
+      if (h ~ /extend/) { bad = 1; exit }
+      sec = ""; next
+    }
+    sec == "extend" {
+      if (l ~ /^[[:space:]]*(usedefault|disabledrules)[[:space:]]*=/) next
+      if (l ~ /^[[:space:]]*path[[:space:]]*=/) {
+        v = $0; sub(/^[^=]*=[[:space:]]*/, "", v)
+        c = substr(v, 1, 1); rest = substr(v, 2); e = index(rest, c)
+        if (path != "" || (c != dq && c != q) || e < 2) { bad = 1; exit }
+        path = substr(rest, 1, e - 1)
+        if (index(path, bs) || substr(rest, e + 1) !~ /^[[:space:]]*(#.*)?$/) { bad = 1; exit }
+        next
+      }
+      if (l ~ item) next
+      bad = 1; exit
+    }
+    l ~ other { bad = 1; exit }
+    END { if (bad || seen > 1) print "/"; else if (path != "") print path }
+  ' < "$1"
+}
+# The file a .gitleaks.toml pulls in through `[extend] path`, when it names
+# one inside the repo.
+extended_file() {
+  [ -f .gitleaks.toml ] || return 0
+  x=$(extend_path .gitleaks.toml) || return 0
+  case "$x" in ""|/*|"~"*|-*|*..*) ;; *) printf '%s\n' "$x" ;; esac
 }
 unsettled_settings() { # prints each settings file that is not trusted
   for f in .gitleaks.toml .gitleaksignore; do
@@ -48,27 +83,30 @@ unsettled_settings() { # prints each settings file that is not trusted
     is_settled "$f" || printf '%s\n' "$f"
   done
   # A trusted .gitleaks.toml can still pull in another file through
-  # `[extend] path`. That file must be inside the repo, trusted the same
-  # way, and must not extend anything further.
+  # `[extend] path`. That file must be a plain file inside the repo, trusted
+  # the same way, and must not extend anything further.
   if [ -f .gitleaks.toml ]; then
-    p=$(extend_path .gitleaks.toml)
+    p=$(extend_path .gitleaks.toml) || p=/
     case "$p" in
       "") ;;
-      /*|"~"*|*..*) printf '%s\n' .gitleaks.toml ;;
-      *) { is_settled "$p" && [ -z "$(extend_path "$p")" ]; } || printf '%s\n' .gitleaks.toml ;;
+      /*|"~"*|-*|*..*) printf '%s\n' .gitleaks.toml ;;
+      *) { [ -f "$p" ] && is_settled "$p" && pp=$(extend_path "$p") && [ -z "$pp" ]; } ||
+        printf '%s\n' .gitleaks.toml ;;
     esac
   fi
 }
 
 if command -v gitleaks >/dev/null 2>&1; then
-  # A commit that changes the settings files is refused as well: you check
-  # the change and commit it with --no-verify yourself.
+  # A commit that changes the settings files, or the file .gitleaks.toml
+  # pulls in, is refused as well: you check the change and commit it with
+  # --no-verify yourself.
   bad=$(
     unsettled_settings
+    x=$(extended_file)
     if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
-      git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore 2>/dev/null
+      git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore ${x:+"$x"} 2>/dev/null
     else
-      git ls-files --cached -- .gitleaks.toml .gitleaksignore 2>/dev/null
+      git ls-files --cached -- .gitleaks.toml .gitleaksignore ${x:+"$x"} 2>/dev/null
     fi
   )
   if [ -n "$bad" ]; then

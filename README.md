@@ -59,7 +59,10 @@ the command. The git-level hooks below do the same.
   scans and skips what they say. Copies committed exactly as they are are
   trusted, but never a link (git doesn't track what it points to), and a
   `.gitleaks.toml` that pulls in another file with `[extend] path` is
-  trusted only if that file is in the repo and committed as it is. A
+  trusted only if that file is in the repo and committed as it is (a
+  commit that changes it is refused too). Only the plain `[extend]` form
+  is read; a settings file that spells it any other way (a dotted
+  `extend.path`, a quoted key, an inline table) is not trusted. A
   commit or push is refused while either file is new, edited, uncommitted
   or a link, and a commit that changes either is refused too: you
   check the change and commit it yourself (with `git commit --no-verify`
