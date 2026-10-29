@@ -20,7 +20,9 @@ export GIT_CONFIG_NOSYSTEM=1
 # real token-shaped string (it would trip gitleaks/GitHub push protection).
 TOK="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
 
-BASE=$(mktemp -d /tmp/git-hooks-test.XXXXXX)
+# Stop if the scratch folder can't be made: carrying on would run the
+# fixtures in whatever folder this script was started from.
+BASE=$(mktemp -d /tmp/git-hooks-test.XXXXXX) || exit 1
 OUT="$BASE/out.txt"
 
 # git with the hooks under test. Plain `git` (no hooks) is for fixtures.
@@ -216,6 +218,68 @@ check allow "clean push, repo has its own pre-push hook" g push -q origin tidy
 expect "repo's own pre-push hook got the list of refs" grep -q "refs/heads/tidy" "$BASE/local-pre-push-stdin"
 expect "repo's own pre-push hook got the remote name" grep -q -x "origin" "$BASE/local-pre-push-arg"
 rm -f .git/hooks/pre-push
+
+# ==== gaps found in review (Oct 2026) ====
+printf '[allowlist]\npaths = [".*"]\n' > "$BASE/allow-all.toml"
+newrepo settings
+
+# ---- a gitleaks:allow note on the line does not exempt it ----
+echo "TOKEN=$TOK # gitleaks:allow" > s.txt
+git add s.txt
+check block "secret marked gitleaks:allow" g commit -qm "x"
+git reset -q -- s.txt
+
+# ---- GITLEAKS_CONFIG set by the command is ignored ----
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block "GITLEAKS_CONFIG pointing at an allow-all config" env GITLEAKS_CONFIG="$BASE/allow-all.toml" git -c core.hooksPath="$HOOKS" commit -qm "x"
+
+# ---- settings files that are not committed exactly as they are ----
+cp "$BASE/allow-all.toml" .gitleaks.toml
+check block "untracked allow-all .gitleaks.toml" g commit -qm "x"
+expect "report names the settings file" output_has ".gitleaks.toml"
+rm .gitleaks.toml
+echo "s.txt:github-pat:1" > .gitleaksignore
+check block "untracked .gitleaksignore" g commit -qm "x"
+rm .gitleaksignore
+git reset -q -- s.txt
+
+# ---- a commit that changes them is refused; the user's route is --no-verify ----
+printf '[extend]\nuseDefault = true\n[allowlist]\npaths = ["fixtures/"]\n' > .gitleaks.toml
+git add .gitleaks.toml
+check block "commit that adds .gitleaks.toml" g commit -qm "settings"
+check allow "same commit with --no-verify" g commit -q --no-verify -m "settings"
+mkdir fixtures
+echo "TOKEN=$TOK" > fixtures/sample.txt
+git add fixtures
+check allow "committed settings are trusted" g commit -qm "fixture"
+git add s.txt
+check block "committed settings skip only what they say" g commit -qm "x"
+cp "$BASE/allow-all.toml" .gitleaks.toml
+check block "committed .gitleaks.toml edited to allow everything" g commit -qm "x"
+git checkout -q -- .gitleaks.toml
+git reset -q -- s.txt
+rm -f s.txt
+
+# ---- pre-push: the same three ways round the scan ----
+git init -q --bare "$BASE/remote2.git"
+newrepo pushes2
+git remote add origin "$BASE/remote2.git"
+git checkout -q -b marked
+echo "TOKEN=$TOK # gitleaks:allow" > s.txt
+git add s.txt
+git commit -qm "fixture: leak marked gitleaks:allow"
+check block "push of a commit whose secret is marked gitleaks:allow" g push -q origin marked
+check block "push with GITLEAKS_CONFIG pointing at an allow-all config" env GITLEAKS_CONFIG="$BASE/allow-all.toml" git -c core.hooksPath="$HOOKS" push -q origin marked
+git checkout -q main
+git checkout -q -b clean2
+echo "clean" > c.txt
+git add c.txt
+git commit -qm "clean commit"
+cp "$BASE/allow-all.toml" .gitleaks.toml
+check block "push with an untracked allow-all .gitleaks.toml" g push -q origin clean2
+rm .gitleaks.toml
+check allow "same push once the settings file is gone" g push -q origin clean2
 
 echo ""
 echo "passed: $pass, failed: $fail"

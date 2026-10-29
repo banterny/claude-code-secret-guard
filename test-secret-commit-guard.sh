@@ -18,7 +18,10 @@ export GIT_CONFIG_NOSYSTEM=1
 # real token-shaped string (it would trip gitleaks/GitHub push protection).
 TOK="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
 
-REPO=$(mktemp -d /tmp/secret-guard-test.XXXXXX)
+# Each scratch folder must be made, or the script stops: carrying on would
+# run the fixtures (commits, file overwrites) in whatever folder it was
+# started from, such as this repo.
+REPO=$(mktemp -d /tmp/secret-guard-test.XXXXXX) || exit 1
 cd "$REPO" || exit 1
 git init -q
 git config user.email test@test.com
@@ -119,7 +122,7 @@ check block 'git push origin main'
 # Second scratch repo with a git-ignored build folder holding a fake secret
 # (the shape of Next.js's `.next/`): nothing in it can ever be committed, so
 # it must never cause a block.
-REPO2=$(mktemp -d /tmp/secret-guard-test.XXXXXX)
+REPO2=$(mktemp -d /tmp/secret-guard-test.XXXXXX) || exit 1
 cd "$REPO2" || exit 1
 git init -q
 git config user.email test@test.com
@@ -175,7 +178,7 @@ git commit -qm "leak commit" >/dev/null
 check block 'git push origin main' "$REPO2"
 
 # ---- repo with no commits yet (no HEAD to diff against) ----
-REPO3=$(mktemp -d /tmp/secret-guard-test.XXXXXX)
+REPO3=$(mktemp -d /tmp/secret-guard-test.XXXXXX) || exit 1
 cd "$REPO3" || exit 1
 git init -q
 git config user.email test@test.com
@@ -191,6 +194,120 @@ echo "clean" > first.txt
 git add first.txt
 echo "TOKEN=$TOK" >> first.txt
 check block 'git commit -am "first"' "$REPO3"
+
+# ==== gaps found in review (Oct 2026) ====
+NEW=$(mktemp -d /tmp/secret-guard-test.XXXXXX) || exit 1
+newrepo() { # $1 = folder name (may contain spaces); leaves cwd in the new repo
+  mkdir -p "$NEW/$1" && cd "$NEW/$1" || exit 1
+  git init -q
+  git config user.email test@test.com
+  git config user.name test
+  echo "hello" > README.md
+  git add README.md
+  git commit -qm init >/dev/null
+}
+ALLOW_ALL='[allowlist]
+paths = [".*"]'
+
+# ---- a gitleaks:allow note on the line does not exempt it ----
+newrepo allow-note
+echo "TOKEN=$TOK # gitleaks:allow" > s.txt
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
+
+# ---- gitleaks settings files not committed exactly as they are ----
+newrepo settings
+printf '%s\n' "$ALLOW_ALL" > .gitleaks.toml
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block 'git commit -m "x"' "$PWD"          # untracked allow-all .gitleaks.toml
+check block 'git push' "$PWD"
+rm .gitleaks.toml
+echo "s.txt:github-pat:1" > .gitleaksignore
+check block 'git commit -m "x"' "$PWD"          # untracked .gitleaksignore
+rm .gitleaksignore
+git reset -q
+printf '[extend]\nuseDefault = true\n[allowlist]\npaths = ["fixtures/"]\n' > .gitleaks.toml
+git add .gitleaks.toml
+check block 'git commit -m "add scanner settings"' "$PWD"   # a commit that changes them
+git commit -qm "settings, committed by the user" >/dev/null
+mkdir fixtures
+echo "TOKEN=$TOK" > fixtures/sample.txt
+git add fixtures
+check allow 'git commit -m "x"' "$PWD"          # committed settings are trusted...
+git add s.txt
+check block 'git commit -m "x"' "$PWD"          # ...and skip only what they say
+printf '%s\n' "$ALLOW_ALL" > .gitleaks.toml
+check block 'git commit -m "x"' "$PWD"          # committed settings, edited in place
+git checkout -q -- .gitleaks.toml
+
+# ---- GITLEAKS_CONFIG in the environment is ignored ----
+printf '%s\n' "$ALLOW_ALL" > "$NEW/allow-all.toml"
+export GITLEAKS_CONFIG="$NEW/allow-all.toml"
+check block 'git commit -m "x"' "$PWD"
+unset GITLEAKS_CONFIG
+git reset -q
+rm -rf s.txt fixtures
+
+# ---- a `git add` earlier in the command; the new file isn't staged yet ----
+newrepo chained-add
+echo "TOKEN=$TOK" > new.txt
+check block 'git add . && git commit -m "x"' "$PWD"
+check block 'git add -A && git commit -m "x"' "$PWD"
+check block 'git stage new.txt && git commit -m "x"' "$PWD"
+check block 'git -C . add new.txt && git commit -m "x"' "$PWD"
+check allow 'git commit -m "add the token later"' "$PWD"   # "add" in a message isn't a git add
+rm new.txt
+# removing a committed secret is not refused, even by the wider scan
+echo "TOKEN=$TOK" > old.txt
+git add old.txt
+git commit -qm "fixture: a secret committed earlier" >/dev/null
+echo "gone" > old.txt
+check allow 'git add . && git commit -m "remove token"' "$PWD"
+check allow 'git commit -am "remove token"' "$PWD"
+git checkout -q -- old.txt
+
+# ---- commit run from a subfolder, secret staged at the top ----
+newrepo subfolder
+mkdir sub
+echo "x" > sub/a.txt
+git add sub
+git commit -qm layout >/dev/null
+echo "TOKEN=$TOK" > root.txt
+git add root.txt
+check block 'git commit -m "x"' "$PWD/sub"
+check block 'cd subfolder && git commit -m "x"' "$NEW"
+git reset -q
+rm root.txt
+
+# ---- the command moves into the repo itself ----
+newrepo "with space"
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block "cd \"$PWD\" && git commit -m x" "$NEW"
+check block "cd '$PWD'; git commit -m x" "$NEW"
+check block 'cd "with space" && git commit -m x' "$NEW"
+check block "git -C \"$PWD\" commit -m x" "$NEW"
+check allow 'cd "no such folder" && git commit -m x' "$NEW"   # stays outside any repo
+git reset -q
+rm s.txt
+check allow "cd \"$PWD\" && git commit -m x" "$NEW"
+
+# ---- push of a branch other than the current one ----
+newrepo pushes
+git init -q --bare "$NEW/remote.git"
+git remote add origin "$NEW/remote.git"
+git push -q origin HEAD:main 2>/dev/null
+check allow 'git push' "$PWD"                   # everything is already on the remote
+git checkout -q -b feature
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+git commit -qm "fixture: leak commit" >/dev/null
+git checkout -q -
+check block 'git push origin feature' "$PWD"
+check block 'git push --all' "$PWD"
+
+cd / && rm -rf "$NEW"
 
 echo ""
 echo "passed: $pass, failed: $fail"

@@ -17,12 +17,41 @@
 # Block: exit 1 + reason on stderr. Allow: exit 0. If gitleaks is not on
 # PATH the commit is allowed, with a warning.
 
+# gitleaks also takes its settings from these environment variables, which a
+# command can set for itself (`GITLEAKS_CONFIG=... git commit`) to replace
+# the rules this scan relies on.
+unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+
 if command -v gitleaks >/dev/null 2>&1; then
+  # gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it
+  # scans and skips whatever they tell it to, so a change to them can switch
+  # the scan off. Only copies exactly as committed are trusted, and a commit
+  # that changes them is refused: you check the change and commit it with
+  # --no-verify yourself.
+  bad=$(
+    for f in .gitleaks.toml .gitleaksignore; do
+      { [ -e "$f" ] || [ -L "$f" ]; } || continue
+      git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
+        git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
+      printf '%s\n' "$f"
+    done
+    if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
+      git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore 2>/dev/null
+    else
+      git ls-files --cached -- .gitleaks.toml .gitleaksignore 2>/dev/null
+    fi
+  )
+  if [ -n "$bad" ]; then
+    echo "Blocked by the secret guard (git pre-commit hook, $0): gitleaks's settings file(s) $(printf '%s\n' "$bad" | sort -u | tr '\n' ' ')are new or changed, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. If you are an agent, do not edit, delete or work around them; explain the block to the user. If you made the change yourself and have checked it, commit it with \`git commit --no-verify\`." >&2
+    exit 1
+  fi
+
   # Scans the staged diff, added lines only (so a commit that removes a
   # leaked secret is not refused). For `commit -a` and `commit <path>` git
   # hands this hook a temporary index holding what will be committed, and
-  # gitleaks reads the diff through git, so it sees that too.
-  report=$(gitleaks git --pre-commit --staged --no-banner --redact --no-color --verbose 2>&1)
+  # gitleaks reads the diff through git, so it sees that too. A
+  # `gitleaks:allow` note on a line does not exempt it.
+  report=$(gitleaks git --pre-commit --staged --no-banner --redact --no-color --ignore-gitleaks-allow --verbose 2>&1)
   if [ "$?" = "1" ]; then
     echo "Blocked by the secret guard (git pre-commit hook, $0): changes being committed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; unstage/revert the file, rotate the credential, and explain the block to the user. Details:" >&2
     printf '%s\n' "$report" >&2

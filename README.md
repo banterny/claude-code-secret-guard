@@ -28,15 +28,36 @@ commit/push.
 
 ## What it catches
 
-- `git commit` — scans the staged diff (`gitleaks git --pre-commit --staged`).
-- `git commit -a` / `-am` / `--all` — also scans unstaged changes to
-  tracked files and untracked files that aren't git-ignored (piped into
-  `gitleaks stdin`), since those flags — or a `git add --all` chained ahead
-  of the commit — fold in changes `--staged` alone can't see yet.
-  Git-ignored files (build output such as `.next/`) can't be committed and
-  are never scanned.
-- `git push` — scans commits not yet on the upstream branch (falling back to
-  `origin/HEAD`, or the tip commit alone if neither is available).
+- `git commit` — scans the staged diff (`gitleaks git --pre-commit --staged`),
+  from the top of the repo, so a commit made from a subfolder is scanned in
+  full. A command that starts with `cd <folder> &&` (or `;`), or uses
+  `git -C <folder>`, is scanned in that folder.
+- `git commit -a` / `-i` / `-o` (or `--all`, `--include`, `--only`, also
+  inside a cluster such as `-am`), or a `git add` / `git stage` earlier in
+  the same command — also scans lines added by unstaged changes to tracked
+  files, and untracked files that aren't git-ignored (piped into
+  `gitleaks stdin`), since these fold in changes `--staged` alone can't see
+  yet. Removed lines are not scanned, so a commit that deletes a leaked
+  secret goes through. Git-ignored files (build output such as `.next/`)
+  can't be committed and are never scanned.
+- `git push` — scans every commit on a local branch or tag that no remote
+  has yet, so `git push origin <other branch>`, `--all` and `--tags` are
+  covered as well as the current branch. On a first push, with no
+  remote-tracking branches, that is the whole history.
+
+It also refuses to let the scan be switched off from inside the repo or
+the command. The git-level hooks below do the same.
+
+- A `gitleaks:allow` note on a line does not exempt it
+  (`--ignore-gitleaks-allow`).
+- The `GITLEAKS_CONFIG` and `GITLEAKS_CONFIG_TOML` environment variables
+  are ignored.
+- gitleaks reads `.gitleaks.toml` and `.gitleaksignore` from the folder it
+  scans and skips what they say. Copies committed exactly as they are are
+  trusted. A commit or push is refused while either file is new, edited
+  or uncommitted, and a commit that changes either is refused too: you
+  check the change and commit it yourself (with `git commit --no-verify`
+  when the git-level hooks are installed).
 
 Trigger matching is deliberately loose (word "git" + word "commit"/"push"
 anywhere in the command, regardless of flag order or position). A false
@@ -137,7 +158,9 @@ Things to know:
 the Claude Code hook against it — trigger
 matching, staged/unstaged/untracked/committed secrets, a secret in a
 git-ignored build folder (must not block), a repo with no commits yet,
-push-range fallbacks, and a non-git working directory.
+pushes of other branches, a non-git working directory, commits run from a
+subfolder or after `cd`, chained `git add`, and each way of switching the
+scan off (allow notes, settings files, environment variables).
 
 `test-git-hooks.sh` runs real `git commit` and `git push` commands, against
 scratch repos and a scratch bare remote, with the git-level hooks wired in.
@@ -145,12 +168,14 @@ scratch repos and a scratch bare remote, with the git-level hooks wired in.
 No network access, nothing touches your real repos or your git
 configuration (both scripts tell git to ignore your global config, so an
 installed copy of the git-level hooks doesn't interfere with their
-fixtures).
+fixtures). Both make their scratch repos in `/tmp` and stop at once if
+they can't, so inside a sandbox that blocks `/tmp` (such as Claude Code's)
+run them outside it.
 
 ## Limitations
 
 These are limits of the Claude Code hook. The git-level hooks above don't
-share the last three (new-branch pushes, removed lines, `-C`).
+share the last two (reading the command, unpushed branches).
 
 - **Fails open, silently.** If `gitleaks`, `jq`, or `git` aren't on `PATH`,
   the hook exits 0 (allow) with no warning. This is the right failure
@@ -162,23 +187,20 @@ share the last three (new-branch pushes, removed lines, `-C`).
   strings, etc.). A bare `password = "..."` or an unrecognized vendor format
   can slip through its default ruleset. Treat this as raising the floor, not
   a guarantee.
-- **First push of a brand-new branch scans only the tip commit.** With no
-  upstream and no resolvable `origin/HEAD`, there's no reference point to
-  diff against, so the hook falls back to scanning just the most recent
-  commit. A secret buried in an earlier, non-tip commit on that first push
-  won't be caught at push time — commit-time scanning is the primary
-  control; push-time scanning is a backstop for history the hook didn't see
-  committed (e.g. commits made outside Claude Code, or before this hook was
-  installed).
-- **The `-a` scan reads removed lines too.** It scans the raw `git diff`
-  text, so `git commit -am "remove leaked key"` is blocked by the very line
-  being deleted. Stage the change and commit without `-a` instead; the
-  staged scan only looks at added lines.
-- **cwd, not `-C`.** The hook reads the working directory from the
-  `PreToolUse` payload's `cwd` field, which is reliable for ordinary
-  invocations. A command that explicitly targets another directory via
-  `git -C /other/path commit` will still be scanned against the hook's own
-  `cwd`, not `/other/path`.
+- **Settings files already committed are trusted.** A `.gitleaks.toml` or
+  `.gitleaksignore` committed before this hook was installed (or committed
+  by you with `--no-verify`) is used as it is. Read a repo's copies before
+  relying on the scan there.
+- **Reading the command is approximate.** The hook starts from the
+  `PreToolUse` payload's `cwd` and follows a leading `cd <folder>` and a
+  `git -C <folder>`. A folder reached any other way, a commit through a git
+  alias, or `git commit <path>` with no flag (which commits that file's
+  unstaged changes) is not seen as it really is. The git-level hooks run
+  inside git itself and cover these.
+- **A secret on any unpushed branch blocks every push.** The push scan
+  covers every local commit that no remote has, so a secret left on one
+  unpushed branch also blocks pushing a different, clean one. Remove the
+  secret from that branch (or delete the branch) first.
 
 Tested on macOS with gitleaks 8.30.1, using POSIX `sh` and extended-regex
 (`grep -E`) throughout; not yet verified on Linux.

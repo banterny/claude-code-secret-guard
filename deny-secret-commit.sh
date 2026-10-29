@@ -42,34 +42,87 @@ has_word git && has_word push && is_push=1
 
 [ "$is_commit" = "1" ] || [ "$is_push" = "1" ] || exit 0
 
+# gitleaks also takes its settings from these environment variables, which
+# would let them replace the rules this scan relies on.
+unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+GITLEAKS_FLAGS="--no-banner --redact --no-color --ignore-gitleaks-allow"
+
+# Find the repo the command will act on: a leading `cd <dir> &&` (or `;`),
+# then a `git -C <dir>`, each relative to where the command starts. A folder
+# may be quoted. Anything cleverer than that is left to the git-level hooks.
+Q="'"
+DIR_RE="(\"([^\"]*)\"|${Q}([^${Q}]*)${Q}|([^[:space:];&|\"${Q}]+))"
+expand_home() {
+  case "$1" in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s/%s' "$HOME" "${1#\~/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+cd_dir=$(printf '%s\n' "$cmd" | sed -nE "1s/^[[:space:]]*cd[[:space:]]+${DIR_RE}[[:space:]]*(&&|;).*/\\2\\3\\4/p")
+[ -n "$cd_dir" ] && cd "$(expand_home "$cd_dir")" 2>/dev/null
+c_dir=$(printf '%s\n' "$cmd" | grep -oE "(^|[^a-zA-Z0-9_])git[[:space:]]+-C[[:space:]]+${DIR_RE}" | head -n 1 |
+  sed -E "s/.*git[[:space:]]+-C[[:space:]]+${DIR_RE}.*/\\2\\3\\4/")
+[ -n "$c_dir" ] && cd "$(expand_home "$c_dir")" 2>/dev/null
+
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+# Scan from the top of the work tree: from a subfolder, gitleaks only looks
+# at that subfolder's changes, and reads its settings files from there.
+top=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && cd "$top"
+
+# gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it scans
+# and skips whatever they tell it to, so anyone who can edit them can switch
+# the scan off. Only copies exactly as committed are trusted; this prints
+# any that are new, changed or uncommitted.
+unsettled_settings() {
+  for f in .gitleaks.toml .gitleaksignore; do
+    { [ -e "$f" ] || [ -L "$f" ]; } || continue
+    git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
+      git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
+    printf '%s\n' "$f"
+  done
+}
+# Settings files whose staged copy differs from the last commit.
+staged_settings() {
+  if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
+    git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore 2>/dev/null
+  else
+    git ls-files --cached -- .gitleaks.toml .gitleaksignore 2>/dev/null
+  fi
+}
+settings_block() { # $1 = the files
+  echo "Blocked by the secret-commit guard ($0): gitleaks's settings file(s) $(printf '%s' "$1" | tr '\n' ' ')are new or changed, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. Do not edit, delete or work around them; explain the block to the user, who can check the change and commit it themselves." >&2
+  exit 2
+}
 
 if [ "$is_commit" = "1" ]; then
-  # `-a`/`--all` (bare or combined into a short-flag cluster like `-am`)
-  # folds unstaged tracked changes into the commit, which `--staged` alone
-  # would miss (the diff isn't in the index yet when this hook fires) —
-  # this check is loose the same way the git/commit/push checks above are:
-  # matching `-a` anywhere in the command can over-trigger the fuller scan
-  # on an unrelated flag elsewhere in a chained command, but that only
-  # costs scanning a wider (still-correct) diff, never a missed secret.
-  is_all=0
-  printf '%s\n' "$cmd" | grep -qE '(^|[[:space:]])(--all|-[a-zA-Z]*a[a-zA-Z]*)([[:space:]]|$)' && is_all=1
+  bad=$({ unsettled_settings; staged_settings; } | sort -u)
+  [ -n "$bad" ] && settings_block "$bad"
+
+  # Changes that are not staged yet but could still end up in this commit:
+  # `-a`/`--all`, `-i`/`--include` and `-o`/`--only` (bare or inside a
+  # short-flag cluster like `-am`), or a `git add`/`git stage` earlier in the
+  # same command, which has not run yet when this hook fires. Matched
+  # loosely: an unrelated flag elsewhere in a chained command only costs
+  # scanning a wider (still-correct) diff, never a missed secret.
+  is_wide=0
+  printf '%s\n' "$cmd" | grep -qE '(^|[[:space:]])(--all|--include|--only|-[a-zA-Z]*[aio][a-zA-Z]*)([[:space:]]|$)' && is_wide=1
+  printf '%s\n' "$cmd" | grep -qE '(^|[^a-zA-Z0-9_])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(add|stage)([[:space:]]|$)' && is_wide=1
   # The staged scan always runs, so the wider scan can only add coverage.
-  report=$(gitleaks git --pre-commit --staged --no-banner --redact --no-color 2>&1)
+  report=$(gitleaks git --pre-commit --staged $GITLEAKS_FLAGS 2>&1)
   rc=$?
-  if [ "$rc" != "1" ] && [ "$is_all" = "1" ]; then
-    # Wider scan: what is not staged yet but could still end up in this
-    # commit — unstaged changes to tracked files (`git diff`, which unlike
-    # `git diff HEAD` also works before the first commit), plus untracked
-    # files that are not git-ignored (a `git add --all` chained ahead of
-    # the commit hasn't run yet when this hook fires). Piped into
+  if [ "$rc" != "1" ] && [ "$is_wide" = "1" ]; then
+    # Wider scan: lines added by unstaged changes to tracked files (`git
+    # diff`, which unlike `git diff HEAD` also works before the first
+    # commit; added lines only, so a commit that removes a secret is not
+    # refused), plus untracked files that are not git-ignored. Piped into
     # `gitleaks stdin` so only that text is scanned: `detect --no-git
     # --pipe` ignores the pipe and scans the whole folder, git-ignored
     # build output included.
     report=$({
-      git diff --no-ext-diff --no-color
+      git diff --no-ext-diff --no-color -U0 | sed -n 's/^+//p'
       git ls-files --others --exclude-standard -z -- ':/' | xargs -0 cat --
-    } 2>/dev/null | gitleaks stdin --no-banner --redact --no-color 2>&1)
+    } 2>/dev/null | gitleaks stdin $GITLEAKS_FLAGS 2>&1)
     rc=$?
   fi
   if [ "$rc" = "1" ]; then
@@ -80,21 +133,19 @@ if [ "$is_commit" = "1" ]; then
 fi
 
 if [ "$is_push" = "1" ]; then
-  # Note: `git rev-parse` can print a best-effort guess to stdout even when
-  # it exits non-zero (e.g. an unresolvable `origin/HEAD` echoes back
-  # literally), so branch on the command's own exit status via `&&`, not on
-  # whether the captured string is non-empty.
-  if upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) && [ -n "$upstream" ]; then
-    range="${upstream}..HEAD"
-  elif origin_head=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null) && [ -n "$origin_head" ]; then
-    range="${origin_head}..HEAD"
-  else
-    range="-1"
-  fi
-  report=$(gitleaks git --no-banner --redact --no-color --log-opts="$range" 2>&1)
+  bad=$(unsettled_settings)
+  [ -n "$bad" ] && settings_block "$bad"
+
+  # Every commit on a local branch or tag that no remote has yet. Reading
+  # the command for which branches it pushes (`git push origin feature`,
+  # `--all`, `--tags`) is easy to get wrong, so this covers them all; the
+  # cost is that a secret on an unpushed branch also blocks pushing another.
+  # With no remote-tracking branches at all, that is the whole history,
+  # which is what a first push publishes.
+  report=$(gitleaks git $GITLEAKS_FLAGS --log-opts="--branches --tags --not --remotes" 2>&1)
   rc=$?
   if [ "$rc" = "1" ]; then
-    echo "Blocked by the secret-commit guard ($0): commit(s) about to be pushed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user. Details:" >&2
+    echo "Blocked by the secret-commit guard ($0): commit(s) on local branches or tags that are not on any remote yet appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user. Details:" >&2
     printf '%s\n' "$report" >&2
     exit 2
   fi

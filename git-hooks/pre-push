@@ -24,7 +24,30 @@ is_zero() {
   esac
 }
 
+# gitleaks also takes its settings from these environment variables, which a
+# command can set for itself to replace the rules this scan relies on.
+unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+
 if command -v gitleaks >/dev/null 2>&1; then
+  # gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it
+  # scans (here, the top of the work tree) and skips whatever they tell it
+  # to. In a work tree, only copies exactly as committed are trusted. A bare
+  # repo has no work tree, so files kept beside it are used as they are.
+  if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ]; then
+    bad=$(
+      for f in .gitleaks.toml .gitleaksignore; do
+        { [ -e "$f" ] || [ -L "$f" ]; } || continue
+        git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
+          git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
+        printf '%s ' "$f"
+      done
+    )
+    if [ -n "$bad" ]; then
+      echo "Blocked by the secret guard (git pre-push hook, $0): gitleaks's settings file(s) ${bad}are new or changed and not committed. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. If you are an agent, do not edit, delete or work around them; explain the block to the user. If the change is yours, check it and commit it (with \`git commit --no-verify\`), or undo it, then push again." >&2
+      exit 1
+    fi
+  fi
+
   while read -r local_ref local_sha remote_ref remote_sha; do
     [ -n "$local_sha" ] || continue
     is_zero "$local_sha" && continue
@@ -37,7 +60,7 @@ if command -v gitleaks >/dev/null 2>&1; then
       # to hold, not just the tip.
       range="${local_sha} --not --remotes=${remote}"
     fi
-    report=$(gitleaks git --no-banner --redact --no-color --verbose --log-opts="$range" 2>&1)
+    report=$(gitleaks git --no-banner --redact --no-color --ignore-gitleaks-allow --verbose --log-opts="$range" 2>&1)
     if [ "$?" = "1" ]; then
       echo "Blocked by the secret guard (git pre-push hook, $0): commit(s) about to be pushed to ${remote_ref} appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user. Details:" >&2
       printf '%s\n' "$report" >&2
