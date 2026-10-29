@@ -389,6 +389,32 @@ git add s.txt
 check block 'git commit -m "x"' "$PWD"
 git reset -q
 
+# ---- more disguises gitleaks honours ----
+newrepo disguised-extend
+printf '%s\n' "$ALLOW_ALL" > "$NEW/outside4.toml"
+printf "[extend]\ndisabledRules = '''\n[allowlist]\n'''\npath = \"%s\"\n" "$NEW/outside4.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: triple-quoted disabledRules hiding a header" >/dev/null
+echo "TOKEN=$TOK" > s.txt
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
+git reset -q
+printf '"ext\\u0065nd".path = "%s"\n' "$NEW/outside4.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: extend key spelled with an escape" >/dev/null
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
+git reset -q
+# a path that is also a git pattern (*.toml) is taken as a plain name
+printf '[extend]\nuseDefault = true\n' > base.toml
+printf '[extend]\npath = "*.toml"\n' > .gitleaks.toml
+git add base.toml .gitleaks.toml
+git commit -qm "fixture: extend path that looks like a pattern" >/dev/null
+printf '%s\n' "$ALLOW_ALL" > '*.toml'
+git add s.txt
+check block 'git commit -m "x"' "$PWD"
+git reset -q
+
 # ---- push while HEAD is a new, empty branch ----
 newrepo unborn
 git checkout -q -b leaky

@@ -313,6 +313,18 @@ echo "TOKEN=$TOK" > s.txt
 git add s.txt
 check block "commit with a dotted extend.path to an allow-all file" g commit -qm "x"
 git reset -q -- s.txt
+printf "[extend]\ndisabledRules = '''\n[allowlist]\n'''\npath = \"%s\"\n" "$BASE/allow-all.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: triple-quoted disabledRules hiding a header"
+git add s.txt
+check block "commit with a triple-quoted value hiding the extend path" g commit -qm "x"
+git reset -q -- s.txt
+printf '"ext\\u0065nd".path = "%s"\n' "$BASE/allow-all.toml" > .gitleaks.toml
+git add .gitleaks.toml
+git commit -qm "fixture: extend key spelled with an escape"
+git add s.txt
+check block "commit with an extend key spelled with an escape" g commit -qm "x"
+git reset -q -- s.txt
 
 # ---- a commit that stages a change to the extended file ----
 newrepo staged-extended

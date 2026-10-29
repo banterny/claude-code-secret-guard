@@ -93,9 +93,10 @@ done | sort -u)
 # the scan off. Only copies exactly as committed are trusted, and never a
 # link, whose target git does not track; this prints any others.
 is_settled() { # $1 = file; tracked, unchanged since the last commit, not a link
+  # GIT_LITERAL_PATHSPECS: the name is a file, not a pattern (`*.toml`).
   [ ! -L "$1" ] && [ -e "$1" ] &&
-    git ls-files --error-unmatch -- "$1" >/dev/null 2>&1 &&
-    git diff --quiet HEAD -- "$1" >/dev/null 2>&1
+    GIT_LITERAL_PATHSPECS=1 git ls-files --error-unmatch -- "$1" >/dev/null 2>&1 &&
+    GIT_LITERAL_PATHSPECS=1 git diff --quiet HEAD -- "$1" >/dev/null 2>&1
 }
 # The `path` in a settings file's [extend] table, if any. gitleaks reads the
 # file as TOML, which can spell the same setting many ways (quoted or dotted
@@ -105,16 +106,35 @@ is_settled() { # $1 = file; tracked, unchanged since the last commit, not a link
 # "/", which is never trusted.
 extend_path() {
   awk -v q="'" -v dq='"' '
+    function count(s, d,   n, i) {
+      n = 0
+      while ((i = index(s, d)) > 0) { n++; s = substr(s, i + length(d)) }
+      return n
+    }
     BEGIN {
-      bs = sprintf("%c", 92)
+      bs = sprintf("%c", 92); sq3 = q q q; dq3 = dq dq dq
       str = "(" dq "[^" dq "]*" dq "|" q "[^" q "]*" q ")"
       item = "^[[:space:]]*(" str "[[:space:]]*,?[[:space:]]*)*[]]?[[:space:]]*(#.*)?$"
       other = "(^|[[:space:].{,]|" dq "|" q ")extend(" dq "|" q ")?[[:space:]]*[.=]"
     }
-    { l = tolower($0) }
+    # Inside a multi-line string: its lines are text, not settings.
+    inml { if (count($0, delim) % 2) inml = 0; next }
+    {
+      l = tolower($0)
+      ns = count($0, sq3); nd = count($0, dq3)
+      # Multi-line strings never belong in [extend]; elsewhere they are
+      # skipped over (gitleaks rules often use them for patterns).
+      if (sec == "extend" && (ns || nd)) { bad = 1; exit }
+      # A key spelled with \u escapes could hide the word extend.
+      k = $0; sub(/=.*/, "", k)
+      if (index(k, bs "u") || index(k, bs "U")) { bad = 1; exit }
+      if (ns % 2) { inml = 1; delim = sq3 } else if (nd % 2) { inml = 1; delim = dq3 }
+    }
     l ~ /^[[:space:]]*(#.*)?$/ { next }
     l ~ /^[[:space:]]*[[]/ {
       h = l; sub(/#.*/, "", h); gsub(/[[:space:]]/, "", h)
+      # gitleaks headers are never quoted or escaped.
+      if (index(h, dq) || index(h, q) || index(h, bs)) { bad = 1; exit }
       if (h == "[extend]") { sec = "extend"; seen++; next }
       if (h ~ /extend/) { bad = 1; exit }
       sec = ""; next
@@ -166,9 +186,9 @@ unsettled_settings() {
 staged_settings() {
   x=$(extended_file)
   if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
-    git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore ${x:+"$x"} 2>/dev/null
+    GIT_LITERAL_PATHSPECS=1 git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore ${x:+"$x"} 2>/dev/null
   else
-    git ls-files --cached -- .gitleaks.toml .gitleaksignore ${x:+"$x"} 2>/dev/null
+    GIT_LITERAL_PATHSPECS=1 git ls-files --cached -- .gitleaks.toml .gitleaksignore ${x:+"$x"} 2>/dev/null
   fi
 }
 settings_block() { # $1 = the files
